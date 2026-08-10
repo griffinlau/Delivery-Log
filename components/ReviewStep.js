@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { theme, s } from '../styles/theme';
 import { splitHighlightSegments, computeStageTime, formatLongDate } from '../lib/deliveryLogRules';
 
@@ -14,20 +14,41 @@ const FIELD_COLUMNS = [
   { key: 'stage', label: 'Stage Time', width: 100, editable: true, align: 'left' },
 ];
 
+const HIGHLIGHT_MODES = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'on', label: 'On' },
+  { value: 'off', label: 'Off' },
+];
+
 function isRowEdited(row, originalRow) {
   if (!originalRow) return false;
-  return FIELD_COLUMNS.some((c) => (row[c.key] || '') !== (originalRow[c.key] || ''));
+  const fieldsChanged = FIELD_COLUMNS.some((c) => (row[c.key] || '') !== (originalRow[c.key] || ''));
+  const modeChanged = (row.highlight_mode || 'auto') !== (originalRow.highlight_mode || 'auto');
+  return fieldsChanged || modeChanged;
 }
 
 export function ReviewStep({ records, originalRecords, deliveryDate, onChange, onBack, onContinue, onReset }) {
   const [editing, setEditing] = useState(null); // { idx, key } | null
   const [draftValue, setDraftValue] = useState('');
+  const [highlightMenuIdx, setHighlightMenuIdx] = useState(null); // row idx with the mode menu open, or null
+  const menuRef = useRef(null);
 
   const dataRows = records.filter((r) => r.type === 'data');
   const editedCount = records.reduce((sum, r, i) => {
     if (r.type !== 'data') return sum;
     return sum + (isRowEdited(r, originalRecords[i]) ? 1 : 0);
   }, 0);
+
+  useEffect(() => {
+    if (highlightMenuIdx === null) return;
+    function handleOutsideClick(e) {
+      if (!e.target.closest('.highlight-menu-wrap')) {
+        setHighlightMenuIdx(null);
+      }
+    }
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [highlightMenuIdx]);
 
   function updateField(idx, key, value) {
     const next = records.map((r, i) => {
@@ -44,7 +65,14 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
     onChange(next);
   }
 
+  function setHighlightMode(idx, mode) {
+    const next = records.map((r, i) => (i === idx ? { ...r, highlight_mode: mode } : r));
+    onChange(next);
+    setHighlightMenuIdx(null);
+  }
+
   function startEdit(idx, key, currentValue) {
+    setHighlightMenuIdx(null);
     setEditing({ idx, key });
     setDraftValue(currentValue || '');
   }
@@ -68,7 +96,7 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
             Delivery Date: {formatLongDate(deliveryDate)}
           </div>
           <div style={{ fontSize: 12, color: theme.textMuted }}>
-            Click any editable field to make a correction.
+            Click any editable field to make a correction. Hover a note for highlight options.
           </div>
         </div>
         <div style={{ fontSize: 12.5, color: editedCount > 0 ? theme.accent : theme.textMuted, fontWeight: 600 }}>
@@ -110,98 +138,151 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
                 }
 
                 const edited = isRowEdited(row, originalRecords[idx]);
-                const segments = splitHighlightSegments(row.notes);
+                const mode = row.highlight_mode || 'auto';
+                const segments = splitHighlightSegments(row.notes, mode);
+                const menuOpen = highlightMenuIdx === idx;
 
                 return (
                   <tr key={`row-${idx}`} className="data-row">
                     {FIELD_COLUMNS.map((c, ci) => {
                       const isEditingThis = editing && editing.idx === idx && editing.key === c.key;
+                      const isFirst = ci === 0;
 
-                    const isFirst = ci === 0;
+                      if (isFirst) {
+                        return (
+                          <td key={c.key} className="sticky-col">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              {edited && <span className="edited-dot" title="Edited" />}
+                              <span>{row.order_no}</span>
+                            </div>
+                          </td>
+                        );
+                      }
 
-                    if (isFirst) {
-                      return (
-                        <td key={c.key} className="sticky-col">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            {edited && <span className="edited-dot" title="Edited" />}
-                            <span>{row.order_no}</span>
-                          </div>
-                        </td>
-                      );
-                    }
+                      if (c.key === 'notes' && isEditingThis) {
+                        return (
+                          <td key={c.key} className="editing-cell">
+                            <div className={`mode-badge mode-${mode}`}>
+                              Highlight: {HIGHLIGHT_MODES.find((m) => m.value === mode)?.label}
+                            </div>
+                            <input
+                              autoFocus
+                              value={draftValue}
+                              onChange={(e) => setDraftValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') { e.preventDefault(); commit(); }
+                                else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+                              }}
+                              onBlur={commit}
+                            />
+                          </td>
+                        );
+                      }
 
-                    if (isEditingThis) {
-                      return (
-                        <td key={c.key} className="editing-cell">
-                          <input
-                            autoFocus
-                            value={draftValue}
-                            onChange={(e) => setDraftValue(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') { e.preventDefault(); commit(); }
-                              else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
-                            }}
-                            onBlur={commit}
-                            style={{ textAlign: c.align }}
-                          />
-                        </td>
-                      );
-                    }
+                      if (isEditingThis) {
+                        return (
+                          <td key={c.key} className="editing-cell">
+                            <input
+                              autoFocus
+                              value={draftValue}
+                              onChange={(e) => setDraftValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') { e.preventDefault(); commit(); }
+                                else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+                              }}
+                              onBlur={commit}
+                              style={{ textAlign: c.align }}
+                            />
+                          </td>
+                        );
+                      }
 
-                    if (c.key === 'notes') {
+                      if (c.key === 'notes') {
+                        return (
+                          <td key={c.key} className="editable-cell notes-cell">
+                            <span
+                              className="notes-render"
+                              onClick={() => startEdit(idx, c.key, row.notes)}
+                            >
+                              {segments.map((seg, si) =>
+                                seg.highlighted ? (
+                                  <span key={si} className="notes-highlight">{seg.text}</span>
+                                ) : (
+                                  <span key={si}>{seg.text}</span>
+                                )
+                              )}
+                              <span className="edit-icon">✎</span>
+                            </span>
+
+                            <div className="highlight-menu-wrap">
+                              <button
+                                type="button"
+                                className={`highlight-icon-btn ${mode !== 'auto' ? 'active' : ''}`}
+                                title={`Highlight: ${HIGHLIGHT_MODES.find((m) => m.value === mode)?.label}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setHighlightMenuIdx(menuOpen ? null : idx);
+                                }}
+                              >
+                                🖍
+                              </button>
+                              {menuOpen && (
+                                <div className="highlight-menu" onClick={(e) => e.stopPropagation()}>
+                                  {HIGHLIGHT_MODES.map((m) => (
+                                    <div
+                                      key={m.value}
+                                      className={`highlight-menu-item ${mode === m.value ? 'selected' : ''}`}
+                                      onClick={() => setHighlightMode(idx, m.value)}
+                                    >
+                                      {mode === m.value ? '✓ ' : ''}{m.label}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      }
+
                       return (
                         <td
                           key={c.key}
                           className={c.editable ? 'editable-cell' : ''}
-                          onClick={() => c.editable && startEdit(idx, c.key, row.notes)}
+                          style={{ textAlign: c.align }}
+                          onClick={() => c.editable && startEdit(idx, c.key, row[c.key])}
                         >
-                          <span className="notes-render">
-                            {segments.map((seg, si) =>
-                              seg.highlighted ? (
-                                <span key={si} className="notes-highlight">{seg.text}</span>
-                              ) : (
-                                <span key={si}>{seg.text}</span>
-                              )
-                            )}
-                          </span>
+                          {row[c.key]}
                           {c.editable && <span className="edit-icon">✎</span>}
                         </td>
                       );
-                    }
-
-                    return (
-                      <td
-                        key={c.key}
-                        className={c.editable ? 'editable-cell' : ''}
-                        style={{ textAlign: c.align }}
-                        onClick={() => c.editable && startEdit(idx, c.key, row[c.key])}
-                      >
-                        {row[c.key]}
-                        {c.editable && <span className="edit-icon">✎</span>}
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })}
+                    })}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </div>
 
-      <div className="action-bar">
-        <button style={s.secondaryButton} onClick={onBack}>← Back</button>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <button
-            style={editedCount === 0 ? { ...s.secondaryButton, opacity: 0.5, cursor: 'default' } : s.secondaryButton}
-            onClick={onReset}
-            disabled={editedCount === 0}
-          >
-            Reset Changes
-          </button>
-          <button style={s.primaryButton} onClick={onContinue}>
-            Continue to Generate →
-          </button>
+      {/* Reserves scroll room so the fixed bar below never overlaps the
+          last table row or the page footer. */}
+      <div className="bottom-spacer" />
+
+      <div className="action-bar-wrap">
+        <div className="action-bar">
+          <button style={s.secondaryButton} onClick={onBack}>← Back</button>
+          <div style={{ display: 'flex', gap: 12 }}>
+            <button
+              style={editedCount === 0 ? { ...s.secondaryButton, opacity: 0.5, cursor: 'default' } : s.secondaryButton}
+              onClick={onReset}
+              disabled={editedCount === 0}
+            >
+              Reset Changes
+            </button>
+            <button style={s.primaryButton} onClick={onContinue}>
+              Continue to Generate →
+            </button>
+          </div>
         </div>
       </div>
 
@@ -272,6 +353,16 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
         .editable-cell:hover {
           background: ${theme.cellHoverBg} !important;
         }
+        .notes-cell {
+          cursor: default;
+        }
+        .notes-cell:hover {
+          background: ${theme.cellHoverBg} !important;
+        }
+        .notes-render {
+          cursor: pointer;
+          display: block;
+        }
         .edit-icon {
           opacity: 0;
           margin-left: 6px;
@@ -279,7 +370,8 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
           color: ${theme.accent};
           transition: opacity 0.1s ease;
         }
-        .editable-cell:hover .edit-icon {
+        .editable-cell:hover .edit-icon,
+        .notes-cell:hover .edit-icon {
           opacity: 1;
         }
         .editing-cell {
@@ -298,6 +390,22 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
           outline: none;
           box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.15);
         }
+        .mode-badge {
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: 0.5px;
+          text-transform: uppercase;
+          margin-bottom: 4px;
+        }
+        .mode-badge.mode-auto {
+          color: ${theme.textMuted};
+        }
+        .mode-badge.mode-on {
+          color: ${theme.highlightBg};
+        }
+        .mode-badge.mode-off {
+          color: ${theme.textSecondary};
+        }
         .edited-dot {
           width: 6px;
           height: 6px;
@@ -306,25 +414,86 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
           flex-shrink: 0;
           display: inline-block;
         }
-        .notes-render {
-          line-height: 1.5;
-        }
         .notes-highlight {
           background: ${theme.highlightBg};
           color: ${theme.highlightText};
           padding: 0 1px;
           border-radius: 2px;
+          line-height: 1.5;
+        }
+        .highlight-menu-wrap {
+          position: absolute;
+          top: 4px;
+          right: 4px;
+        }
+        .highlight-icon-btn {
+          opacity: 0;
+          width: 20px;
+          height: 20px;
+          border-radius: 4px;
+          border: none;
+          background: transparent;
+          font-size: 12px;
+          line-height: 1;
+          cursor: pointer;
+          transition: opacity 0.1s ease, background 0.1s ease;
+        }
+        .notes-cell:hover .highlight-icon-btn,
+        .highlight-icon-btn.active {
+          opacity: 1;
+        }
+        .highlight-icon-btn:hover {
+          background: ${theme.accentSoft};
+        }
+        .highlight-menu {
+          position: absolute;
+          top: 24px;
+          right: 0;
+          background: #0f2a31;
+          border: 1px solid ${theme.cardBorder};
+          border-radius: 6px;
+          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+          z-index: 5;
+          min-width: 90px;
+          overflow: hidden;
+        }
+        .highlight-menu-item {
+          padding: 7px 12px;
+          font-size: 12px;
+          color: ${theme.textPrimary};
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .highlight-menu-item:hover {
+          background: ${theme.accentSoft};
+        }
+        .highlight-menu-item.selected {
+          color: ${theme.accent};
+          font-weight: 700;
+        }
+        .bottom-spacer {
+          height: 84px;
+        }
+        .action-bar-wrap {
+          position: fixed;
+          left: 50%;
+          bottom: 0;
+          transform: translateX(-50%);
+          width: min(1700px, 96vw);
+          z-index: 20;
+          pointer-events: none;
         }
         .action-bar {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          margin-top: 18px;
-          padding: 14px 4px;
-          position: sticky;
-          bottom: 0;
-          background: ${theme.pageBg};
-          border-top: 1px solid ${theme.cardBorder};
+          padding: 12px 18px;
+          background: ${theme.cardBg};
+          border: 1px solid ${theme.cardBorder};
+          border-bottom: none;
+          border-radius: 10px 10px 0 0;
+          box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.35);
+          pointer-events: auto;
         }
       `}</style>
     </div>

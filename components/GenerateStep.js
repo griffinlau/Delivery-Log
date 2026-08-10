@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { theme, s } from '../styles/theme';
-import { isHighlighted, formatLongDate, formatTitleDateSuffix } from '../lib/deliveryLogRules';
+import { resolveHighlight, formatLongDate, formatTitleDateSuffix } from '../lib/deliveryLogRules';
 import { isRowEdited } from './ReviewStep';
 
 export function GenerateStep({ deliveryDate, records, originalRecords, onBack, onStartNew }) {
@@ -12,7 +12,7 @@ export function GenerateStep({ deliveryDate, records, originalRecords, onBack, o
 
   const dataRows = records.filter((r) => r.type === 'data');
   const sectionRows = records.filter((r) => r.type === 'section');
-  const highlightedCount = dataRows.filter((r) => isHighlighted(r.notes)).length;
+  const highlightedCount = dataRows.filter((r) => resolveHighlight(r.notes, r.highlight_mode)).length;
   const editedCount = records.reduce((sum, r, i) => {
     if (r.type !== 'data') return sum;
     return sum + (isRowEdited(r, originalRecords[i]) ? 1 : 0);

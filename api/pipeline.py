@@ -122,12 +122,29 @@ EXCLUDE_PATTERN = re.compile(r'\d+\s*items?,?\s*|bag,?\s*', re.IGNORECASE)
 
 
 def is_highlighted(notes):
+    """Keyword-only detection (ignores any manual override) — used at parse
+    time, when every row is still freshly-parsed and mode is always 'auto'."""
     return bool(HIGHLIGHT_PATTERN.search(notes or ''))
 
 
-def highlight_notes(text):
-    """Returns reportlab-flavored markup (<font backColor="yellow">) used at PDF-build time."""
-    if not HIGHLIGHT_PATTERN.search(text):
+def should_highlight(notes, mode):
+    """Resolves the effective highlight decision for a row: an explicit
+    'on'/'off' override always wins; 'auto' (or missing/unrecognized) falls
+    back to keyword detection."""
+    mode = (mode or 'auto').strip().lower()
+    if mode == 'on':
+        return True
+    if mode == 'off':
+        return False
+    return is_highlighted(notes)
+
+
+def render_notes_markup(text, mode=None):
+    """Returns reportlab-flavored markup (<font backColor="yellow">) used at
+    PDF-build time. The leading 'N items, bag,' portion is always left plain;
+    only the actionable remainder is wrapped, and only when should_highlight()
+    says to. mode is the row's highlight_mode ('auto' | 'on' | 'off')."""
+    if not should_highlight(text, mode):
         return text
     out = []
     pos = 0
@@ -139,6 +156,12 @@ def highlight_notes(text):
     if pos < len(text):
         out.append(f'<font backColor="yellow">{text[pos:]}</font>')
     return ''.join(out)
+
+
+# Back-compat alias (build_pdf below now calls render_notes_markup directly;
+# kept in case anything external still imports the old name).
+def highlight_notes(text):
+    return render_notes_markup(text, mode='auto')
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +224,7 @@ def build_pdf(title, records, out):
             rows.append([
                 _P(_esc(rec.get('order_no', ''))), _P(_esc(rec.get('contact', ''))),
                 _P(_esc(rec.get('company', ''))), _P(_esc(rec.get('address', ''))),
-                _P(_esc(rec.get('total', '')), right_style), _P(highlight_notes(notes_raw)),
+                _P(_esc(rec.get('total', '')), right_style), _P(render_notes_markup(notes_raw, rec.get('highlight_mode'))),
                 _P(_esc(rec.get('group', ''))), _P(_esc(rec.get('departure', ''))), _P(_esc(stage)),
             ])
             r += 1
@@ -237,5 +260,6 @@ def with_stage_times(records):
             rec = dict(rec)
             rec['stage'] = compute_stage_time(rec.get('departure', ''))
             rec['stage_manual'] = False
+            rec['highlight_mode'] = 'auto'
         out.append(rec)
     return out
