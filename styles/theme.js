@@ -22,6 +22,9 @@ export const theme = {
   highlightText: '#1a1a1a',
   sectionRowBg: '#12333a',
   editedDot: '#2dd4bf',
+  cellHoverBg: 'rgba(45, 212, 191, 0.07)',
+  cellEditingBg: 'rgba(45, 212, 191, 0.16)',
+  rowHoverBg: 'rgba(255, 255, 255, 0.02)',
   fontFamily:
     '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif',
 };
@@ -71,9 +74,14 @@ export const s = {
     borderBottom: `1px solid ${theme.cardBorder}`,
   },
   content: {
-    maxWidth: 1180,
     margin: '0 auto',
-    padding: '32px 24px 64px',
+    padding: '32px 24px 48px',
+  },
+  contentNarrow: {
+    maxWidth: 700,
+  },
+  contentWide: {
+    maxWidth: 'min(1700px, 96vw)',
   },
   sectionLabel: {
     fontSize: 12,

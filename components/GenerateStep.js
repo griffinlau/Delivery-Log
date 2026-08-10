@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { theme, s } from '../styles/theme';
-import { isHighlighted } from '../lib/deliveryLogRules';
+import { isHighlighted, formatLongDate, formatTitleDateSuffix } from '../lib/deliveryLogRules';
 import { isRowEdited } from './ReviewStep';
 
-export function GenerateStep({ title, records, originalRecords, onBack, onStartNew }) {
+export function GenerateStep({ deliveryDate, records, originalRecords, onBack, onStartNew }) {
   const [status, setStatus] = useState('generating'); // generating | ready | error
   const [errorMsg, setErrorMsg] = useState('');
   const [pdfUrl, setPdfUrl] = useState(null);
@@ -17,6 +17,11 @@ export function GenerateStep({ title, records, originalRecords, onBack, onStartN
     if (r.type !== 'data') return sum;
     return sum + (isRowEdited(r, originalRecords[i]) ? 1 : 0);
   }, 0);
+
+  // The PDF title always reflects the confirmed Delivery Date (which may have
+  // been auto-detected, defaulted to tomorrow, or manually corrected) — never
+  // the raw title string from the original upload.
+  const title = `OPS - Print Delivery Log - ${formatTitleDateSuffix(deliveryDate)}`;
 
   useEffect(() => {
     if (generatedOnce.current) return;
@@ -104,7 +109,7 @@ export function GenerateStep({ title, records, originalRecords, onBack, onStartN
               Delivery Log Ready
             </div>
             <div style={{ fontSize: 13, color: theme.textSecondary, marginBottom: 20 }}>
-              {title}
+              Delivery Date: {formatLongDate(deliveryDate)}
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 24 }}>
