@@ -1,6 +1,9 @@
 {
   "functions": {
-    "api/process.py": {
+    "api/parse.py": {
+      "runtime": "@vercel/python@4.3.0"
+    },
+    "api/generate.py": {
       "runtime": "@vercel/python@4.3.0"
     }
   }

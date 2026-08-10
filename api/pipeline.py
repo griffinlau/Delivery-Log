@@ -9,6 +9,8 @@ import pdfplumber
 
 # ---------------------------------------------------------------------------
 # 1. PARSE the raw ops-export PDF into structured records
+#    Works entirely in-memory — accepts a file path OR a file-like object
+#    (e.g. io.BytesIO), so the API layer never has to write the upload to disk.
 # ---------------------------------------------------------------------------
 
 BOUNDARIES = [
@@ -53,7 +55,7 @@ def _group_lines(words):
 
 
 def parse_delivery_log(path_or_fileobj):
-    """Returns (title, [ {type:'section', label} | {type:'data', ...fields} ]) """
+    """Returns (title, [ {type:'section', label} | {type:'data', ...fields} ])"""
     records = []
     title = None
     with pdfplumber.open(path_or_fileobj) as pdf:
@@ -98,12 +100,17 @@ def parse_delivery_log(path_or_fileobj):
 # ---------------------------------------------------------------------------
 
 def compute_stage_time(departure_str):
-    t = dt.datetime.strptime(departure_str.strip().upper().replace('AM', 'AM').replace('PM', 'PM'), '%I:%M %p')
+    """Returns '' if departure_str can't be parsed instead of raising —
+    callers (API layer) decide how to surface that as a validation error."""
+    try:
+        t = dt.datetime.strptime(departure_str.strip().upper(), '%I:%M %p')
+    except (ValueError, AttributeError):
+        return ''
     staged = t - dt.timedelta(minutes=30)
     minute = staged.minute
     rounded_minute = 5 * round(minute / 5)
     staged = staged.replace(minute=0) + dt.timedelta(minutes=rounded_minute)
-    return staged.strftime('%I:%M %p').lower().lstrip('0') if False else staged.strftime('%I:%M %p').lower()
+    return staged.strftime('%I:%M %p').lower()
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +121,12 @@ HIGHLIGHT_PATTERN = re.compile(r'\b(?:hot food|boxed meals|salsa|coffee|hh|alcoh
 EXCLUDE_PATTERN = re.compile(r'\d+\s*items?,?\s*|bag,?\s*', re.IGNORECASE)
 
 
+def is_highlighted(notes):
+    return bool(HIGHLIGHT_PATTERN.search(notes or ''))
+
+
 def highlight_notes(text):
+    """Returns reportlab-flavored markup (<font backColor="yellow">) used at PDF-build time."""
     if not HIGHLIGHT_PATTERN.search(text):
         return text
     out = []
@@ -131,6 +143,9 @@ def highlight_notes(text):
 
 # ---------------------------------------------------------------------------
 # 4. GENERATE the finished PDF (header repeats on every page automatically)
+#    Accepts a plain list-of-dicts (as returned by parse_delivery_log, or as
+#    edited/round-tripped through the browser) and an output path OR a
+#    file-like object (e.g. io.BytesIO) so no disk write is required.
 # ---------------------------------------------------------------------------
 
 styles = getSampleStyleSheet()
@@ -147,11 +162,16 @@ HEADERS = ["Order No.", "Contact Name", "Company", "Delivery Address", "Order To
            "Internal ops notes", "Delivery Group", "Departure\nTime", "Stage\nTime"]
 
 
+def _esc(s):
+    return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 def _P(text, style=cell_style):
     return Paragraph(text, style)
 
 
-def build_pdf(title, records, out_path):
+def build_pdf(title, records, out):
+    """out may be a filesystem path (str) or a file-like object (e.g. io.BytesIO)."""
     rows = [[_P(h, header_style) for h in HEADERS]]
     style_cmds = [
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E4E4E4')),
@@ -165,18 +185,24 @@ def build_pdf(title, records, out_path):
     ]
     r = 1
     for rec in records:
-        if rec['type'] == 'section':
-            rows.append([_P(rec['label'], section_style)] + [''] * (len(HEADERS) - 1))
+        if rec.get('type') == 'section':
+            rows.append([_P(_esc(rec.get('label', ''))), '', '', '', '', '', '', '', ''])
             style_cmds.append(('SPAN', (0, r), (-1, r)))
             style_cmds.append(('BACKGROUND', (0, r), (-1, r), colors.HexColor('#EEEEEE')))
             style_cmds.append(('FONTNAME', (0, r), (-1, r), 'Helvetica-Bold'))
             r += 1
         else:
-            stage = compute_stage_time(rec['departure']) if rec.get('departure') else ''
+            # Prefer an explicit 'stage' value (may be user-edited/overridden);
+            # fall back to computing it from departure if absent.
+            stage = rec.get('stage')
+            if stage is None or stage == '':
+                stage = compute_stage_time(rec.get('departure', ''))
+            notes_raw = _esc(rec.get('notes', ''))
             rows.append([
-                _P(rec['order_no']), _P(rec['contact']), _P(rec['company']), _P(rec['address']),
-                _P(rec['total'], right_style), _P(highlight_notes(rec['notes'])), _P(rec['group']),
-                _P(rec['departure']), _P(stage),
+                _P(_esc(rec.get('order_no', ''))), _P(_esc(rec.get('contact', ''))),
+                _P(_esc(rec.get('company', ''))), _P(_esc(rec.get('address', ''))),
+                _P(_esc(rec.get('total', '')), right_style), _P(highlight_notes(notes_raw)),
+                _P(_esc(rec.get('group', ''))), _P(_esc(rec.get('departure', ''))), _P(_esc(stage)),
             ])
             r += 1
 
@@ -191,16 +217,25 @@ def build_pdf(title, records, out_path):
         canvas.drawRightString(PAGE_W - MARGIN, 0.3 * inch, f"Page {doc.page}")
         canvas.restoreState()
 
-    doc = BaseDocTemplate(out_path, pagesize=landscape(letter), leftMargin=MARGIN, rightMargin=MARGIN,
+    doc = BaseDocTemplate(out, pagesize=landscape(letter), leftMargin=MARGIN, rightMargin=MARGIN,
                            topMargin=0.35 * inch, bottomMargin=0.5 * inch)
     frame = Frame(MARGIN, 0.5 * inch, PAGE_W - 2 * MARGIN, PAGE_H - 0.35 * inch - 0.5 * inch, id='normal')
     doc.addPageTemplates([PageTemplate(id='main', frames=[frame], onPage=header_footer)])
 
-    story = [Paragraph(title or 'OPS - Print Delivery Log', title_style), Spacer(1, 8), t]
+    story = [Paragraph(_esc(title) or 'OPS - Print Delivery Log', title_style), Spacer(1, 8), t]
     doc.build(story)
 
 
-def process(input_path, output_path):
-    title, records = parse_delivery_log(input_path)
-    build_pdf(title, records, output_path)
-    return title, records
+# ---------------------------------------------------------------------------
+# Convenience: attach stage times to freshly-parsed records (used by /api/parse)
+# ---------------------------------------------------------------------------
+
+def with_stage_times(records):
+    out = []
+    for rec in records:
+        if rec.get('type') == 'data':
+            rec = dict(rec)
+            rec['stage'] = compute_stage_time(rec.get('departure', ''))
+            rec['stage_manual'] = False
+        out.append(rec)
+    return out
