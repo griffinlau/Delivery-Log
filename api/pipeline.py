@@ -27,6 +27,20 @@ SECTION_RE = re.compile(r'^\d{1,2}:\d{2}\s*(am|pm)\s*-\s*\d{1,2}:\d{2}\s*(am|pm)
 ORDER_NO_RE = re.compile(r'^\d{4,6}$')
 TITLE_RE = re.compile(r'^OPS\s*-\s*Print Delivery Log')
 
+# The primary way pickups are identified: a literal standalone "Pick Ups"
+# heading in the source PDF, after which every order row is a pickup until
+# the document ends (there's no "resume deliveries" marker in this report
+# format). This is checked BEFORE treating a line as a wrapped continuation,
+# so "Pick Ups" is never accidentally appended to the previous row's fields.
+PICKUP_HEADING_RE = re.compile(r'^pick\s*ups$', re.IGNORECASE)
+
+# Optional secondary/fallback signal: some exports may instead represent a
+# pickup as a normal-shaped row with the literal text "Pickup" in Delivery
+# Group or "N/A" in Departure Time, rather than a separate heading. Applied
+# only to rows a "Pick Ups" heading didn't already classify.
+PICKUP_GROUP_RE = re.compile(r'^pickup$', re.IGNORECASE)
+NA_RE = re.compile(r'^n/?a$', re.IGNORECASE)
+
 
 def _col_for(x0):
     col = BOUNDARIES[0][1]
@@ -54,10 +68,31 @@ def _group_lines(words):
     return [lines[k] for k in sorted(lines)]
 
 
+def _classify_row(rec):
+    """Returns 'pickup' if this row's own values indicate a pickup order
+    (Delivery Group literally 'Pickup', or Departure Time literally 'N/A'),
+    else 'data' for a normal delivery."""
+    if PICKUP_GROUP_RE.match((rec.get('group') or '').strip()):
+        return 'pickup'
+    if NA_RE.match((rec.get('departure') or '').strip()):
+        return 'pickup'
+    return 'data'
+
+
 def parse_delivery_log(path_or_fileobj):
-    """Returns (title, [ {type:'section', label} | {type:'data', ...fields} ])"""
+    """Returns (title, records). Each record is one of:
+      {'type': 'section', 'label': ...}          — a delivery time window
+      {'type': 'pickup_section', 'label': ...}    — the "Pick Ups" divider
+      {'type': 'data', ...fields}                 — a normal delivery order
+      {'type': 'pickup', ...fields}                — a pickup order. Never
+                                                        requires or
+                                                        calculates Stage
+                                                        Time.
+    """
     records = []
     title = None
+    in_pickups = False  # flips True after a literal "Pick Ups" heading
+
     with pdfplumber.open(path_or_fileobj) as pdf:
         for page in pdf.pages:
             words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
@@ -70,13 +105,18 @@ def parse_delivery_log(path_or_fileobj):
                     continue
                 if text.startswith('Order No.') or text.startswith('Generated'):
                     continue
+                if PICKUP_HEADING_RE.match(text.strip()):
+                    records.append({'type': 'pickup_section', 'label': text.strip()})
+                    in_pickups = True
+                    continue
                 if SECTION_RE.match(text):
                     records.append({'type': 'section', 'label': text})
                     continue
                 first_word = line[0]
                 if _col_for(first_word['x0']) == 'order_no' and ORDER_NO_RE.match(first_word['text']):
-                    rec = {'type': 'data', 'order_no': first_word['text'], 'contact': '', 'company': '',
-                           'address': '', 'total': '', 'notes': '', 'group': '', 'departure': ''}
+                    rec = {'type': 'pickup' if in_pickups else 'data', 'order_no': first_word['text'],
+                           'contact': '', 'company': '', 'address': '', 'total': '', 'notes': '',
+                           'group': '', 'departure': ''}
                     for w in line[1:]:
                         c = _col_for(w['x0'])
                         if c == 'order_no':
@@ -84,7 +124,7 @@ def parse_delivery_log(path_or_fileobj):
                         rec[c] = (rec[c] + ' ' + w['text']).strip()
                     records.append(rec)
                 else:
-                    if not records or records[-1]['type'] != 'data':
+                    if not records or records[-1]['type'] not in ('data', 'pickup'):
                         continue
                     rec = records[-1]
                     for w in line:
@@ -92,6 +132,16 @@ def parse_delivery_log(path_or_fileobj):
                         if c == 'order_no':
                             c = 'contact'
                         rec[c] = (rec[c] + ' ' + w['text']).strip()
+
+    # Fallback classification: only for rows a "Pick Ups" heading didn't
+    # already tag, catch the value-based signal (literal "Pickup" Delivery
+    # Group, or literal "N/A" Departure Time) some other export format might
+    # use instead of a heading.
+    for rec in records:
+        if rec.get('type') == 'data':
+            if _classify_row(rec) == 'pickup':
+                rec['type'] = 'pickup'
+
     return title, records
 
 
@@ -117,7 +167,7 @@ def compute_stage_time(departure_str):
 # 3. HIGHLIGHT internal ops notes
 # ---------------------------------------------------------------------------
 
-HIGHLIGHT_PATTERN = re.compile(r'\b(?:hot food|boxed meals|salsa|coffee|hh|alcohol|bevs?)\b', re.IGNORECASE)
+HIGHLIGHT_PATTERN = re.compile(r'\b(?:hot food|boxed meals|salsa|coffee|hh|alcohol|bevs?|snack packs?)\b', re.IGNORECASE)
 EXCLUDE_PATTERN = re.compile(r'\d+\s*items?,?\s*|bag,?\s*', re.IGNORECASE)
 
 
@@ -208,18 +258,24 @@ def build_pdf(title, records, out):
     ]
     r = 1
     for rec in records:
-        if rec.get('type') == 'section':
+        if rec.get('type') in ('section', 'pickup_section'):
             rows.append([_P(_esc(rec.get('label', ''))), '', '', '', '', '', '', '', ''])
             style_cmds.append(('SPAN', (0, r), (-1, r)))
             style_cmds.append(('BACKGROUND', (0, r), (-1, r), colors.HexColor('#EEEEEE')))
             style_cmds.append(('FONTNAME', (0, r), (-1, r), 'Helvetica-Bold'))
             r += 1
-        else:
-            # Prefer an explicit 'stage' value (may be user-edited/overridden);
-            # fall back to computing it from departure if absent.
-            stage = rec.get('stage')
-            if stage is None or stage == '':
-                stage = compute_stage_time(rec.get('departure', ''))
+        elif rec.get('type') in ('data', 'pickup'):
+            is_pickup = rec.get('type') == 'pickup'
+            # Pickups never get a Stage Time — no Departure Time to base it
+            # on, and the field simply doesn't apply to this order type.
+            if is_pickup:
+                stage = ''
+            else:
+                # Prefer an explicit 'stage' value (may be user-edited/
+                # overridden); fall back to computing it from departure.
+                stage = rec.get('stage')
+                if stage is None or stage == '':
+                    stage = compute_stage_time(rec.get('departure', ''))
             notes_raw = _esc(rec.get('notes', ''))
             rows.append([
                 _P(_esc(rec.get('order_no', ''))), _P(_esc(rec.get('contact', ''))),
@@ -259,6 +315,13 @@ def with_stage_times(records):
         if rec.get('type') == 'data':
             rec = dict(rec)
             rec['stage'] = compute_stage_time(rec.get('departure', ''))
+            rec['stage_manual'] = False
+            rec['highlight_mode'] = 'auto'
+        elif rec.get('type') == 'pickup':
+            # Pickups never get a Stage Time — there's no Departure Time to
+            # base it on, and the field doesn't apply to this order type.
+            rec = dict(rec)
+            rec['stage'] = ''
             rec['stage_manual'] = False
             rec['highlight_mode'] = 'auto'
         out.append(rec)

@@ -40,12 +40,12 @@ def parse_route():
 
     records = with_stage_times(records)
 
-    data_rows = [r for r in records if r.get('type') == 'data']
-    if not data_rows:
+    order_rows = [r for r in records if r.get('type') in ('data', 'pickup')]
+    if not order_rows:
         return jsonify({'error': 'No valid orders were found in this PDF. Double-check '
                                   'it\u2019s the raw OPS Print Delivery Log export.'}), 422
 
-    for r in data_rows:
+    for r in order_rows:
         r['highlighted'] = is_highlighted(r.get('notes', ''))
 
     return jsonify({'title': title, 'records': records})

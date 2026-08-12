@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { theme, s } from '../styles/theme';
 import { resolveHighlight, formatLongDate, formatTitleDateSuffix } from '../lib/deliveryLogRules';
-import { isRowEdited } from './ReviewStep';
+import { isRowEdited, findOriginal } from './ReviewStep';
 
 export function GenerateStep({ deliveryDate, records, originalRecords, onBack, onStartNew }) {
   const [status, setStatus] = useState('generating'); // generating | ready | error
@@ -11,11 +11,13 @@ export function GenerateStep({ deliveryDate, records, originalRecords, onBack, o
   const generatedOnce = useRef(false);
 
   const dataRows = records.filter((r) => r.type === 'data');
+  const pickupRows = records.filter((r) => r.type === 'pickup');
   const sectionRows = records.filter((r) => r.type === 'section');
-  const highlightedCount = dataRows.filter((r) => resolveHighlight(r.notes, r.highlight_mode)).length;
-  const editedCount = records.reduce((sum, r, i) => {
-    if (r.type !== 'data') return sum;
-    return sum + (isRowEdited(r, originalRecords[i]) ? 1 : 0);
+  const highlightedCount = [...dataRows, ...pickupRows]
+    .filter((r) => resolveHighlight(r.notes, r.highlight_mode)).length;
+  const editedCount = records.reduce((sum, r) => {
+    if (r.type !== 'data' && r.type !== 'pickup') return sum;
+    return sum + (isRowEdited(r, findOriginal(originalRecords, r.order_no)) ? 1 : 0);
   }, 0);
 
   // The PDF title always reflects the confirmed Delivery Date (which may have
@@ -114,6 +116,7 @@ export function GenerateStep({ deliveryDate, records, originalRecords, onBack, o
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 24 }}>
               <SummaryStat label="Orders" value={dataRows.length} />
+              <SummaryStat label="Pickups" value={pickupRows.length} />
               <SummaryStat label="Delivery windows" value={sectionRows.length} />
               <SummaryStat label="Highlighted notes" value={highlightedCount} />
               <SummaryStat label="Manual edits" value={editedCount} />

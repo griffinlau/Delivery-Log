@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { theme, s } from '../styles/theme';
-import { splitHighlightSegments, computeStageTime, formatLongDate } from '../lib/deliveryLogRules';
+import { splitHighlightSegments, computeStageTime, classifyRowType, formatLongDate } from '../lib/deliveryLogRules';
 
 const FIELD_COLUMNS = [
-  { key: 'order_no', label: 'Order No.', width: 76, editable: false, align: 'left' },
+  { key: 'order_no', label: 'Order No.', width: 92, editable: false, align: 'left' },
   { key: 'contact', label: 'Contact Name', width: 150, editable: true, align: 'left' },
   { key: 'company', label: 'Company', width: 130, editable: true, align: 'left' },
   { key: 'address', label: 'Delivery Address', width: 230, editable: true, align: 'left' },
@@ -20,23 +20,35 @@ const HIGHLIGHT_MODES = [
   { value: 'off', label: 'Off' },
 ];
 
+const ORDER_TYPES = ['data', 'pickup'];
+const DIVIDER_TYPES = ['section', 'pickup_section'];
+
+// Rows are matched between `records` and `originalRecords` by order_no, not
+// array position — a drag-and-drop reorder changes position without that
+// alone counting as an edit; identity (not index) is what "edited" is
+// measured against.
+function findOriginal(originalRecords, orderNo) {
+  return originalRecords.find((r) => ORDER_TYPES.includes(r.type) && r.order_no === orderNo);
+}
+
 function isRowEdited(row, originalRow) {
   if (!originalRow) return false;
   const fieldsChanged = FIELD_COLUMNS.some((c) => (row[c.key] || '') !== (originalRow[c.key] || ''));
   const modeChanged = (row.highlight_mode || 'auto') !== (originalRow.highlight_mode || 'auto');
-  return fieldsChanged || modeChanged;
+  const typeChanged = row.type !== originalRow.type;
+  return fieldsChanged || modeChanged || typeChanged;
 }
 
 export function ReviewStep({ records, originalRecords, deliveryDate, onChange, onBack, onContinue, onReset }) {
   const [editing, setEditing] = useState(null); // { idx, key } | null
   const [draftValue, setDraftValue] = useState('');
   const [highlightMenuIdx, setHighlightMenuIdx] = useState(null); // row idx with the mode menu open, or null
-  const menuRef = useRef(null);
+  const [dragIndex, setDragIndex] = useState(null); // index currently being dragged
+  const [dropIndex, setDropIndex] = useState(null); // index being dragged over (insert-before target)
 
-  const dataRows = records.filter((r) => r.type === 'data');
-  const editedCount = records.reduce((sum, r, i) => {
-    if (r.type !== 'data') return sum;
-    return sum + (isRowEdited(r, originalRecords[i]) ? 1 : 0);
+  const editedCount = records.reduce((sum, r) => {
+    if (!ORDER_TYPES.includes(r.type)) return sum;
+    return sum + (isRowEdited(r, findOriginal(originalRecords, r.order_no)) ? 1 : 0);
   }, 0);
 
   useEffect(() => {
@@ -59,6 +71,13 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
       }
       if (key === 'stage') {
         updated.stage_manual = true;
+      }
+      // Editing Delivery Group or Departure Time can change whether this
+      // row IS a pickup — e.g. typing "Pickup" into Delivery Group, or
+      // "N/A" into Departure Time — so re-resolve its type from the values,
+      // exactly like the backend parser does.
+      if ((key === 'group' || key === 'departure') && ORDER_TYPES.includes(updated.type)) {
+        updated.type = classifyRowType(updated.group, updated.departure);
       }
       return updated;
     });
@@ -87,6 +106,44 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
     setEditing(null);
   }
 
+  function handleDragStart(idx) {
+    setDragIndex(idx);
+  }
+
+  function handleDragOver(e, idx) {
+    e.preventDefault();
+    if (idx !== dropIndex) setDropIndex(idx);
+  }
+
+  function handleDragEnd() {
+    setDragIndex(null);
+    setDropIndex(null);
+  }
+
+  function handleDrop(e, targetIdx) {
+    e.preventDefault();
+    if (dragIndex === null || dragIndex === targetIdx) {
+      handleDragEnd();
+      return;
+    }
+    const targetIsDivider = DIVIDER_TYPES.includes(records[targetIdx].type);
+    const moved = records[dragIndex];
+    const next = records.filter((_, i) => i !== dragIndex);
+    // Base position of the target within `next` (post-removal shift).
+    const base = targetIdx > dragIndex ? targetIdx - 1 : targetIdx;
+    // Dropping on a data/pickup row inserts BEFORE it (normal reordering).
+    // Dropping on a divider inserts AFTER it — as the first row of the
+    // section that divider begins — not before the divider itself.
+    const insertAt = targetIsDivider ? base + 1 : base;
+    next.splice(insertAt, 0, moved);
+
+    // Reordering never changes what TYPE a row is — pickup vs. delivery is
+    // determined purely by that row's own Delivery Group / Departure Time
+    // values (see classifyRowType), not by which section it sits in.
+    onChange(next);
+    handleDragEnd();
+  }
+
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 6 }}>
@@ -96,7 +153,7 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
             Delivery Date: {formatLongDate(deliveryDate)}
           </div>
           <div style={{ fontSize: 12, color: theme.textMuted }}>
-            Click any editable field to make a correction. Hover a note for highlight options.
+            Click any editable field to make a correction. Drag <span className="handle-inline">⠿</span> to move an order between sections.
           </div>
         </div>
         <div style={{ fontSize: 12.5, color: editedCount > 0 ? theme.accent : theme.textMuted, fontWeight: 600 }}>
@@ -127,23 +184,39 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
             </thead>
             <tbody>
               {records.map((row, idx) => {
-                if (row.type === 'section') {
+                if (DIVIDER_TYPES.includes(row.type)) {
                   return (
-                    <tr key={`section-${idx}`}>
+                    <tr
+                      key={`section-${idx}`}
+                      onDragOver={(e) => handleDragOver(e, idx)}
+                      onDrop={(e) => handleDrop(e, idx)}
+                      className={dropIndex === idx ? 'drop-target' : ''}
+                    >
                       <td colSpan={FIELD_COLUMNS.length} className="section-row">
+                        {row.type === 'pickup_section' && <span className="pickup-badge">PICK UPS</span>}
                         {row.label}
                       </td>
                     </tr>
                   );
                 }
 
-                const edited = isRowEdited(row, originalRecords[idx]);
+                const originalRow = findOriginal(originalRecords, row.order_no);
+                const edited = isRowEdited(row, originalRow);
                 const mode = row.highlight_mode || 'auto';
                 const segments = splitHighlightSegments(row.notes, mode);
                 const menuOpen = highlightMenuIdx === idx;
+                const isPickup = row.type === 'pickup';
 
                 return (
-                  <tr key={`row-${idx}`} className="data-row">
+                  <tr
+                    key={`row-${row.order_no}-${idx}`}
+                    className={`data-row ${dragIndex === idx ? 'dragging' : ''} ${dropIndex === idx ? 'drop-target' : ''}`}
+                    draggable
+                    onDragStart={() => handleDragStart(idx)}
+                    onDragOver={(e) => handleDragOver(e, idx)}
+                    onDrop={(e) => handleDrop(e, idx)}
+                    onDragEnd={handleDragEnd}
+                  >
                     {FIELD_COLUMNS.map((c, ci) => {
                       const isEditingThis = editing && editing.idx === idx && editing.key === c.key;
                       const isFirst = ci === 0;
@@ -152,8 +225,10 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
                         return (
                           <td key={c.key} className="sticky-col">
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span className="drag-handle" title="Drag to move to a different section">⠿</span>
                               {edited && <span className="edited-dot" title="Edited" />}
                               <span>{row.order_no}</span>
+                              {isPickup && <span className="pickup-tag" title="Pickup order">P</span>}
                             </div>
                           </td>
                         );
@@ -244,6 +319,9 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
                         );
                       }
 
+                      const placeholder = isPickup && (c.key === 'group' || c.key === 'departure' || c.key === 'stage')
+                        ? '—' : '';
+
                       return (
                         <td
                           key={c.key}
@@ -251,7 +329,7 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
                           style={{ textAlign: c.align }}
                           onClick={() => c.editable && startEdit(idx, c.key, row[c.key])}
                         >
-                          {row[c.key]}
+                          {row[c.key] || <span className="empty-placeholder">{placeholder}</span>}
                           {c.editable && <span className="edit-icon">✎</span>}
                         </td>
                       );
@@ -337,6 +415,13 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
         .data-row:hover td.sticky-col {
           background: #102a30;
         }
+        .data-row.dragging {
+          opacity: 0.4;
+        }
+        .data-row.drop-target td,
+        tr.drop-target .section-row {
+          box-shadow: inset 0 2px 0 0 ${theme.accent};
+        }
         .section-row {
           background: ${theme.sectionRowBg} !important;
           color: ${theme.textPrimary};
@@ -345,6 +430,48 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
           padding: 10px 12px;
           border-top: 1px solid ${theme.cardBorder};
           border-bottom: 1px solid ${theme.cardBorder};
+        }
+        .pickup-badge {
+          display: inline-block;
+          background: ${theme.accent};
+          color: #04211d;
+          font-size: 10px;
+          font-weight: 800;
+          letter-spacing: 0.5px;
+          padding: 2px 6px;
+          border-radius: 4px;
+          margin-right: 8px;
+          vertical-align: middle;
+        }
+        .drag-handle {
+          cursor: grab;
+          color: ${theme.textMuted};
+          font-size: 13px;
+          flex-shrink: 0;
+          opacity: 0.5;
+          transition: opacity 0.1s ease;
+        }
+        .data-row:hover .drag-handle {
+          opacity: 1;
+        }
+        .handle-inline {
+          color: ${theme.accent};
+        }
+        .pickup-tag {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 15px;
+          height: 15px;
+          border-radius: 3px;
+          background: ${theme.accentSoft};
+          color: ${theme.accent};
+          font-size: 9.5px;
+          font-weight: 800;
+          flex-shrink: 0;
+        }
+        .empty-placeholder {
+          color: ${theme.textMuted};
         }
         .editable-cell {
           cursor: pointer;
@@ -500,4 +627,4 @@ export function ReviewStep({ records, originalRecords, deliveryDate, onChange, o
   );
 }
 
-export { FIELD_COLUMNS, isRowEdited };
+export { FIELD_COLUMNS, isRowEdited, findOriginal };
