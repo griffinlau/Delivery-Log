@@ -13,7 +13,12 @@ export function Header({ dateLabel }) {
           <div style={s.toolSubtitle}>OPERATIONS TOOL</div>
         </div>
       </div>
-      <div style={s.headerDate}>{dateLabel}</div>
+      <div style={s.headerRight}>
+        <a href="https://bi-rite-operations-hub.vercel.app/" style={s.hubLink}>
+          ← Operations Hub
+        </a>
+        <div style={s.headerDate}>{dateLabel}</div>
+      </div>
     </div>
   );
 }
