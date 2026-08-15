@@ -65,6 +65,18 @@ export const s = {
     marginTop: 2,
   },
   headerDate: { color: '#fff', fontSize: 14, fontWeight: 500 },
+  headerRight: { display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', justifyContent: 'flex-end' },
+  hubLink: {
+    color: '#fff',
+    background: 'rgba(255,255,255,0.15)',
+    border: '1px solid rgba(255,255,255,0.3)',
+    borderRadius: 8,
+    padding: '7px 14px',
+    fontSize: 12,
+    fontWeight: 600,
+    textDecoration: 'none',
+    whiteSpace: 'nowrap',
+  },
   stepBar: {
     display: 'flex',
     alignItems: 'center',
